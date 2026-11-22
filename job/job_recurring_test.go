@@ -84,14 +84,19 @@ var recurTableTests = []struct {
 		},
 	},
 	{
-		Name:     "Monthly with Normalization",
+		// Deliberately changed behavior: v1 normalized the month-end
+		// overflow (Jul 31 -> Aug 31 -> Oct 1 -> Nov 1, drifting off the
+		// anchor day). Now the day clamps to the target month's last day
+		// and the anchor day is remembered (Jul 31 -> Aug 31 -> Sep 30 ->
+		// Oct 31).
+		Name:     "Monthly with month-end clamping",
 		Location: "America/Los_Angeles",
 		Start:    "2020-Jul-31 14:09",
 		Interval: "P1M",
 		Checkpoints: []string{
 			"2020-Aug-31 14:09",
-			"2020-Oct-01 14:09",
-			"2020-Nov-01 14:09",
+			"2020-Sep-30 14:09",
+			"2020-Oct-31 14:09",
 		},
 	},
 	{

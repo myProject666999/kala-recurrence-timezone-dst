@@ -45,10 +45,23 @@ func TestV1StartTimePassed(t *testing.T) {
 		j := loadedJob(t, "R/"+rfc3339Ago(5*time.Hour)+"/PT1H")
 		assert.InDelta(t, float64(time.Hour), float64(j.GetWaitDuration()), float64(timingTolerance))
 	})
-	t.Run("ran 10 minutes ago: waits interval minus 10 minutes", func(t *testing.T) {
+	t.Run("ran 10 minutes ago: next grid point after the last run", func(t *testing.T) {
+		// Deliberately changed behavior: v1 waited interval-minus-10-minutes
+		// (it added the period to the actual last-run time, carrying jitter
+		// and month-end drift forward). Now the next run is the first point
+		// on the anchor's grid strictly after the last run. The anchor is
+		// 5h ago with a 1h period, so the grid point is ~now and the job
+		// fires at once.
 		j := loadedJob(t, "R/"+rfc3339Ago(5*time.Hour)+"/PT1H")
 		j.Metadata.LastAttemptedRun = time.Now().Add(-10 * time.Minute)
-		assert.InDelta(t, float64(50*time.Minute), float64(j.GetWaitDuration()), float64(timingTolerance))
+		assert.InDelta(t, float64(0), float64(j.GetWaitDuration()), float64(timingTolerance))
+	})
+	t.Run("ran exactly on a grid point: waits one full interval", func(t *testing.T) {
+		// When the last run sits exactly on the anchor grid, the next run is
+		// the following grid point — the same instant v1 computed.
+		j := loadedJob(t, "R/"+rfc3339Ago(5*time.Hour)+"/PT1H")
+		j.Metadata.LastAttemptedRun = j.scheduleTime.Add(5 * time.Hour) // grid point ~now
+		assert.InDelta(t, float64(time.Hour), float64(j.GetWaitDuration()), float64(timingTolerance))
 	})
 	t.Run("last run more than one interval ago: wait is negative (fires at once)", func(t *testing.T) {
 		j := loadedJob(t, "R/"+rfc3339Ago(5*time.Hour)+"/PT1H")

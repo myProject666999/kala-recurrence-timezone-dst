@@ -17,9 +17,11 @@ var (
 	//nolint:lll
 	tmpl = template.Must(template.New("duration").Parse(`P{{if .Years}}{{.Years}}Y{{end}}{{if .Months}}{{.Months}}M{{end}}{{if .Weeks}}{{.Weeks}}W{{end}}{{if .Days}}{{.Days}}D{{end}}{{if .HasTimePart}}T{{end }}{{if .Hours}}{{.Hours}}H{{end}}{{if .Minutes}}{{.Minutes}}M{{end}}{{if .Seconds}}{{.Seconds}}S{{end}}`))
 
+	// Both patterns are anchored: previously a prefix or suffix around the
+	// duration was silently ignored ("XP1D" parsed as P1D, "P1W2D" as P1W).
 	//nolint:lll
-	full = regexp.MustCompile(`P(?:(?P<year>\d+)Y)?(?:(?P<month>\d+)M)?(?:(?P<day>\d+)D)?(?:(?P<time>T)(?:(?P<hour>\d+)H)?(?:(?P<minute>\d+)M)?(?:(?P<second>\d+)S)?)?`)
-	week = regexp.MustCompile(`P(?:(?P<week>\d+)W)`)
+	full = regexp.MustCompile(`^P(?:(?P<year>\d+)Y)?(?:(?P<month>\d+)M)?(?:(?P<day>\d+)D)?(?:(?P<time>T)(?:(?P<hour>\d+)H)?(?:(?P<minute>\d+)M)?(?:(?P<second>\d+)S)?)?$`)
+	week = regexp.MustCompile(`^P(?:(?P<week>\d+)W)$`)
 )
 
 type Duration struct {

@@ -61,6 +61,15 @@ type Job struct {
 	// job after each run.
 	delayDuration *iso8601.Duration
 
+	// Optional IANA timezone name (e.g. "Europe/Berlin") in which the
+	// schedule's wall clock is interpreted. Empty keeps the legacy behavior:
+	// the schedule start's fixed offset (or UTC when it has none) is used.
+	// Old JSON/gob records without this field decode to the empty default.
+	Timezone string `json:"timezone"`
+	// Location derived from Timezone by InitDelayDuration; nil when Timezone
+	// is empty. Not serialized: rebuilt on every load via InitDelayDuration.
+	scheduleLocation *time.Location
+
 	// Number of times to schedule this job after the
 	// first run.
 	timesToRepeat int64
@@ -300,6 +309,7 @@ func (j *Job) InitDelayDuration(checkTime bool) error {
 		}
 	}
 
+	var startHasOffset bool
 	j.scheduleTime, err = time.Parse(time.RFC3339, splitTime[1])
 	if err != nil {
 		j.scheduleTime, err = time.Parse(RFC3339WithoutTimezone, splitTime[1])
@@ -307,7 +317,52 @@ func (j *Job) InitDelayDuration(checkTime bool) error {
 			log.Errorf("Error converting scheduleTime to a time.Time: %s", err)
 			return err
 		}
+	} else {
+		startHasOffset = true
 	}
+
+	j.scheduleLocation = nil
+	if j.Timezone != "" {
+		loc, locErr := time.LoadLocation(j.Timezone)
+		if locErr != nil {
+			return fmt.Errorf(
+				"Job %s: cannot load timezone %q: %s "+
+					"(kala does not embed a timezone database; the IANA tz data must be installed on the host)",
+				j.Name, j.Timezone, locErr,
+			)
+		}
+		if startHasOffset {
+			// A start with an explicit offset must agree with the offset the
+			// location has at that instant; otherwise the schedule is
+			// ambiguous (e.g. "...+02:00" in Europe/Berlin during winter).
+			_, startOffset := j.scheduleTime.Zone()
+			_, locationOffset := j.scheduleTime.In(loc).Zone()
+			if startOffset != locationOffset {
+				return fmt.Errorf(
+					"Job %s: schedule start %s has offset %s, but timezone %q has offset %s at that time",
+					j.Name, splitTime[1],
+					formatOffsetSeconds(startOffset), j.Timezone, formatOffsetSeconds(locationOffset),
+				)
+			}
+			j.scheduleTime = j.scheduleTime.In(loc)
+		} else {
+			// A start without an offset is interpreted as wall clock in the
+			// given timezone (gap/overlap rules of schedule.go apply).
+			c := j.scheduleTime // parsed as UTC; only its wall clock is used
+			j.scheduleTime = resolveLocalWallClock(time.Date(
+				c.Year(), c.Month(), c.Day(), c.Hour(), c.Minute(), c.Second(), c.Nanosecond(), loc,
+			), loc)
+		}
+		j.scheduleLocation = loc
+	}
+
+	if !unixNanoRepresentable(j.scheduleTime) {
+		return fmt.Errorf(
+			"Job %s: schedule start %s is outside the representable range (years 1678 through 2262)",
+			j.Name, j.scheduleTime.Format(time.RFC3339),
+		)
+	}
+
 	if checkTime {
 		diff := j.scheduleTime.Sub(j.clk.Time().Now())
 		if diff < 0 {
@@ -322,6 +377,12 @@ func (j *Job) InitDelayDuration(checkTime bool) error {
 		if err != nil {
 			log.Errorf("Error converting delayDuration to a iso8601.Duration: %s", err)
 			return err
+		}
+		if j.delayDuration.IsZero() {
+			return fmt.Errorf(
+				"Job %s: schedule %q has a zero-length repeat period, which would never advance",
+				j.Name, j.Schedule,
+			)
 		}
 		log.Debugf("Delay duration is %s", j.delayDuration.RelativeTo(j.clk.Time().Now()))
 	}
@@ -359,7 +420,8 @@ func (j *Job) GetWaitDuration() time.Duration {
 	j.lock.RLock()
 	defer j.lock.RUnlock()
 
-	waitDuration := time.Duration(j.scheduleTime.UnixNano() - j.clk.Time().Now().UnixNano())
+	now := j.clk.Time().Now()
+	waitDuration := j.scheduleTime.Sub(now)
 
 	if waitDuration >= 0 {
 		return waitDuration
@@ -381,24 +443,46 @@ func (j *Job) GetWaitDuration() time.Duration {
 			return 0
 		}
 
-		newRunPoint := j.scheduleTime
-		for newRunPoint.Before(j.clk.Time().Now()) {
-			newRunPoint = j.delayDuration.Add(newRunPoint)
-		}
+		// Next point on the anchor's grid at or after now. Computed directly
+		// from the anchor (not by stepping from the previous point), so a
+		// zero-length period cannot spin here — those are rejected in
+		// InitDelayDuration.
+		newRunPoint := NextRunTime(j.scheduleTime, j.delayDuration, j.scheduleLocation, now, true)
 
-		return newRunPoint.Sub(j.clk.Time().Now())
+		return newRunPoint.Sub(now)
 	}
 
 	if j.Metadata.LastAttemptedRun.IsZero() {
-		waitDuration = j.delayDuration.RelativeTo(j.clk.Time().Now())
+		waitDuration = j.delayDuration.RelativeTo(now)
 	} else {
-		lastRun := j.Metadata.LastAttemptedRun
-		// Needs to be recalculated each time because of Months.
-		lastRun = j.delayDuration.Add(lastRun)
-		waitDuration = lastRun.Sub(j.clk.Time().Now())
+		// The run after the last one is the first grid point strictly after
+		// it, computed from the anchor. Unlike the old Add(lastRun) this
+		// cannot drift at month-end and does not carry jitter forward.
+		//
+		// Without a timezone the wall clock is interpreted in the last
+		// run's location — that is what v1's Add(lastRun) did, so results
+		// are unchanged for existing jobs. With a timezone the schedule's
+		// location governs.
+		loc := j.scheduleLocation
+		if loc == nil {
+			loc = j.Metadata.LastAttemptedRun.Location()
+		}
+		nextRun := NextRunTime(j.scheduleTime, j.delayDuration, loc, j.Metadata.LastAttemptedRun, false)
+		waitDuration = nextRun.Sub(now)
 	}
 
 	return waitDuration
+}
+
+// formatOffsetSeconds renders a zone offset in seconds as "+hh:mm"/"-hh:mm"
+// for error messages.
+func formatOffsetSeconds(offset int) string {
+	sign := "+"
+	if offset < 0 {
+		sign = "-"
+		offset = -offset
+	}
+	return fmt.Sprintf("%s%02d:%02d", sign, offset/3600, (offset%3600)/60)
 }
 
 // Disable stops the job from running by stopping its jobTimer. It also sets Job.Disabled to true,

@@ -37,7 +37,14 @@ func TestCacheRetainShouldRemoveOldJobStats(t *testing.T) {
 	cache.Retain()
 
 	j.lock.RLock()
-	assert.Equal(t, 1, len(j.Stats)) // New job stats should not be cleaned up
+	// New job stats should not be cleaned up. The exact count depends on how
+	// many runs fit in the window: the wait after a run now ends at the next
+	// grid point (in (0, 1s] for PT1S) instead of exactly one interval after
+	// the actual run time.
+	assert.NotEmpty(t, j.Stats)
+	for _, st := range j.Stats {
+		assert.WithinDuration(t, time.Now(), st.RanAt, time.Minute, "only recent stats survive retention")
+	}
 	j.lock.RUnlock()
 }
 
@@ -59,7 +66,10 @@ func TestCacheStartStartsARecurringJobWithStartDateInThePast(t *testing.T) {
 	time.Sleep(time.Second * 2)
 
 	j.lock.RLock()
-	assert.Equal(t, j.Metadata.SuccessCount, uint(1))
+	// The job must have run. It may have run more than once: the wait after
+	// a run now ends at the next grid point (in (0, 1s] for PT1S) instead of
+	// exactly one interval after the actual run time.
+	assert.GreaterOrEqual(t, j.Metadata.SuccessCount, uint(1))
 	j.lock.RUnlock()
 }
 

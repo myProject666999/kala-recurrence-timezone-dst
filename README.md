@@ -223,6 +223,12 @@ Examples:
 
 *To Note: It is recommended to include a timezone within your schedule parameter.*
 
+The optional job field `timezone` takes an IANA name (e.g. `"Europe/Berlin"`) and
+interprets the schedule's wall clock in that timezone, so a daily job stays at the
+same local time across DST switches. See [docs/scheduling.md](docs/scheduling.md)
+for the full recurrence rules (calendar vs. elapsed units, month-end clamping,
+DST gap/overlap handling, and the defaults for jobs without a `timezone`).
+
 #### Interval Between Runs
 
 This is defined by the [ISO8601 Interval Notation](https://en.wikipedia.org/wiki/ISO_8601#Time_intervals).

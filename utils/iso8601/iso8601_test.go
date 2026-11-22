@@ -77,6 +77,29 @@ func TestFromString(t *testing.T) {
 	assert.Equal(t, 6, dur.Seconds)
 }
 
+// The patterns are anchored: a prefix or suffix around the duration is
+// rejected instead of being silently dropped (v1 parsed "XP1D" as P1D and
+// "P1W2D" as P1W).
+func TestFromStringRejectsPrefixAndSuffix(t *testing.T) {
+	t.Parallel()
+
+	for _, bad := range []string{
+		"XP1D", " P1D", "P1D ", "P1Dextra", "P1W2D", "XP1W", "P1WT",
+		"PT1Hfoo", "fooPT1H",
+	} {
+		dur, err := iso8601.FromString(bad)
+		assert.Nil(t, dur, bad)
+		assert.Equal(t, iso8601.ErrBadFormat, err, bad)
+	}
+
+	// The plain forms still parse.
+	for _, good := range []string{"P1D", "P1W", "PT1H", "P1Y2M3DT4H5M6S"} {
+		dur, err := iso8601.FromString(good)
+		assert.NotNil(t, dur, good)
+		assert.Nil(t, err, good)
+	}
+}
+
 func TestString(t *testing.T) {
 	t.Parallel()
 
